@@ -4,7 +4,7 @@ Prose is a spatial runtime, allowing agents to create and supervise their own wo
 
 Using a multi-agent conductor architecture, a lead agent delegates tasks to specialised subagents called 'archetypes', who work in parallel and share context through persistent memory. There are agents for browser control, notification reading, etc.
 
-<<<<<<< HEAD
+
 - [`reference/product-spec.md`](reference/product-spec.md) — what the product is and how it
   behaves, written from a working Rust implementation: colours, dimensions, the line-delimited
   JSON-RPC agent protocol, the input model, and what is deliberately left unbuilt.
@@ -20,7 +20,6 @@ Using a multi-agent conductor architecture, a lead agent delegates tasks to spec
 - [`CLAUDE.md`](CLAUDE.md) — conventions, and where to start.
 =======
 For tasks that don't have an existing archetype, Prose can manufacture one for your specific needs. New archetypes are stored in memory and will be called upon when needed in the future
->>>>>>> 2f6a66a (new readme)
 
 Each archetype opens its own pane in the multiplexer, providing users with a clear view of each browser search, code change, etc. Users may choose to 'background' existing panels while they are running.
 
