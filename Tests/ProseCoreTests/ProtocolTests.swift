@@ -67,6 +67,25 @@ struct ProtocolTests {
         #expect(parseLine(line) == nil)
     }
 
+    @Test("durable automation calls keep their structured payload")
+    func automationCallsParse() throws {
+        let create = #"{"id":8,"method":"automation.create","params":{"definition":{"title":"Daily","task":{"prompt":"report"},"trigger":{"kind":"manual"}}}}"#
+        guard case .request(.number(8), .automationCreate(let definition))? = parseLine(create)
+        else {
+            Issue.record("expected automation.create")
+            throw ExpectationFailure()
+        }
+        #expect(definition["title"]?.string == "Daily")
+
+        #expect(parseLine(#"{"id":9,"method":"automation.list","params":{"include_runs":true}}"#)
+                == .request(id: .number(9), call: .automationList(includeRuns: true)))
+        #expect(parseLine(#"{"id":10,"method":"automation.change","params":{"id":"abc","action":"pause"}}"#)
+                == .request(
+                    id: .number(10),
+                    call: .automationChange(id: "abc", action: "pause")))
+        #expect(parseLine(#"{"id":11,"method":"automation.change","params":{"id":"abc","action":"erase-everything"}}"#) == nil)
+    }
+
     @Test("an unknown event kind is ignored too")
     func unknownEventKindIsIgnored() {
         let line = """
@@ -233,13 +252,29 @@ struct ProtocolTests {
     func askWithoutChoices() throws {
         let line = #"{"id":9,"method":"ask","params":{"session":1,"prompt":"Which?"}}"#
 
-        guard case .request(_, .ask(_, let prompt, let choices, _))? = parseLine(line) else {
+        guard case .request(_, .ask(_, let prompt, let choices, _, let secret))? =
+                parseLine(line) else {
             Issue.record("expected an ask request")
             throw ExpectationFailure()
         }
 
         #expect(prompt == "Which?")
         #expect(choices.isEmpty, "answered by typing rather than clicking")
+        #expect(!secret, "an ordinary question is not a credential")
+    }
+
+    @Test("an ask marked secret asks for a credential")
+    func askForACredential() throws {
+        // The composer masks its input and the transcript keeps dots rather
+        // than the answer. Unmarked, a pasted GitHub token was echoed into a
+        // transcript — and from there into a screenshot.
+        let line = #"{"id":9,"method":"ask","params":{"session":1,"prompt":"Token?","secret":true}}"#
+
+        guard case .request(_, .ask(_, _, _, _, let secret))? = parseLine(line) else {
+            Issue.record("expected an ask request")
+            throw ExpectationFailure()
+        }
+        #expect(secret)
     }
 
     @Test("what we send is valid JSON-RPC on one line")
@@ -488,4 +523,3 @@ struct ProtocolTests {
         #expect("a\nb".javaScriptQuoted == #""a\n b""#.replacingOccurrences(of: " ", with: ""))
     }
 }
-

@@ -23,8 +23,8 @@ from claude_agent_sdk import ClaudeAgentOptions  # noqa: E402
 from prose_agent import credentials, run, skills
 from prose_agent.tools import NEVER_DEFERRED  # noqa: E402
 from prose_agent.asking import Asker  # noqa: E402
-from prose_agent.permissions import (INVISIBLE, NO_BROWSER, UNATTENDED,
-                                     Permissions)  # noqa: E402
+from prose_agent.permissions import (INVISIBLE, NO_AUTHORING, NO_BROWSER,
+                                     UNATTENDED, Permissions)  # noqa: E402
 from prose_agent.prompt import SYSTEM  # noqa: E402
 
 def workspace() -> str:
@@ -69,7 +69,7 @@ def options(asker: Asker) -> ClaudeAgentOptions:
         # `browser-pilot` archetype rather than doing it badly itself, and the
         # tools are withheld rather than merely discouraged.
         allowed_tools=UNATTENDED,
-        disallowed_tools=INVISIBLE + NO_BROWSER,
+        disallowed_tools=INVISIBLE + NO_BROWSER + NO_AUTHORING,
         # So prose's 16ms repaint coalescing has something to coalesce. Without
         # it a reply lands in one lump, which draws worse than the echo agent.
         env=NEVER_DEFERRED,

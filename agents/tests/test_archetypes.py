@@ -10,20 +10,17 @@ written down.
 from __future__ import annotations
 
 import json
-import re
 import tempfile
 import unittest
 from pathlib import Path
 
 import support  # noqa: F401 - puts `agents/` on the path
 from prose_agent import archetypes, tools
+from prose_agent.tools import BROWSER
 from prose_agent.permissions import INVISIBLE, UNATTENDED, allowance
 from prose_agent.archetypes import Archetype, ArchetypeError
 
 BUNDLED = Path(__file__).resolve().parent.parent / "archetypes"
-
-#: A `{name}` in a body, but not the `{"key": …}` of a JSON example.
-PLACEHOLDER = re.compile(r"\{([a-z_][a-z0-9_]*)\}")
 
 MINIMAL = '''---
 name: tester
@@ -143,60 +140,67 @@ class EveryBundledArchetype(unittest.TestCase):
         somewhere that does not forgive."""
         self.assertEqual(len(self.loaded()), len(self.files()))
 
-    def test_the_description_says_when_to_reach_for_it(self) -> None:
-        for archetype in self.loaded():
-            self.assertIn("use when", archetype.description.lower(),
-                          f"{archetype.name}: say when, not what")
-            self.assertLess(len(archetype.description), 1024, archetype.name)
+    def test_they_all_lint_clean(self) -> None:
+        """Every rule lives in `archetypes.lint`, so that the suite and
+        `prose_archetype_check` cannot disagree about what deployable means —
+        and so an author gets these findings before the file is written rather
+        than from a failing test afterwards."""
+        for path in self.files():
+            self.assertEqual(
+                archetypes.lint(path.read_text(encoding="utf-8"), path.stem), [],
+                path.stem)
 
-    def test_there_are_real_instructions(self) -> None:
-        """The whole argument for an archetype is that it holds the detail the
-        parent does not. One that says little is a skill written in the wrong
-        place."""
-        for archetype in self.loaded():
-            self.assertGreater(len(archetype.body.strip()), 600, archetype.name)
 
-    def test_every_prose_tool_named_exists(self) -> None:
+class Linting(unittest.TestCase):
+    """What `lint` catches that nothing else does.
+
+    Every one of these produces an archetype that *loads* — or silently does
+    not — rather than raising anywhere, which is why they are worth a test each.
+    """
+
+    def problems(self, header: str = "", body: str = "x" * 700) -> str:
+        text = (f"---\nname: tester\ndescription: Use when testing.\n{header}"
+                f"---\n\n{body}")
+        return " | ".join(archetypes.lint(text, "tester"))
+
+    def test_a_file_that_would_not_parse_says_only_that(self) -> None:
+        """Every other rule reads a field that failure means we do not have."""
+        found = archetypes.lint("---\nname: tester\n", "tester")
+        self.assertEqual(len(found), 1)
+
+    def test_a_key_the_parser_does_not_know(self) -> None:
+        """Dropped in silence, so a draft can declare `tools:` and read as
+        working while the child gets the default allowance."""
+        self.assertIn("'tools'", self.problems("tools: Read, Bash\n"))
+
+    def test_a_description_that_does_not_route(self) -> None:
+        text = ("---\nname: tester\ndescription: Reads files and reports.\n"
+                "---\n\n" + "x" * 700)
+        self.assertIn("use when", " | ".join(archetypes.lint(text, "tester")))
+
+    def test_a_body_with_nothing_in_it(self) -> None:
+        self.assertIn("body", self.problems(body="too short"))
+
+    def test_a_tool_name_that_does_not_exist(self) -> None:
         """`qualify` passes an unrecognised name through untouched and the SDK
-        then ignores it, so `browser_txt` in an `allow` list is an allowance
-        that silently is not there."""
-        real = {name.rsplit("__", 1)[-1] for name in tools.tool_names()}
-        for archetype in self.loaded():
-            for name in archetype.allow + archetype.deny:
-                if name.startswith(("prose_", "browser_")):
-                    self.assertIn(name, real, f"{archetype.name}: no such tool {name}")
+        ignores it, so `browser_txt` is an allowance that is simply not there."""
+        self.assertIn("browser_txt", self.problems("allow: browser_txt\n"))
 
-    def test_every_placeholder_is_declared(self) -> None:
-        for archetype in self.loaded():
-            for used in set(PLACEHOLDER.findall(archetype.body)):
-                self.assertIn(used, archetype.parameters,
-                              f"{archetype.name}: {{{used}}} is never bound")
+    def test_a_placeholder_nobody_declared(self) -> None:
+        self.assertIn("{scope}", self.problems(body="Stay inside {scope}. " * 40))
 
-    def test_every_parameter_is_used(self) -> None:
-        """A declared parameter the body never mentions reaches the model only
-        as a name in a schema, which is a knob wired to nothing."""
-        for archetype in self.loaded():
-            used = set(PLACEHOLDER.findall(archetype.body))
-            for declared in archetype.parameters:
-                self.assertIn(declared, used,
-                              f"{archetype.name}: {declared} is declared but unused")
+    def test_a_parameter_wired_to_nothing(self) -> None:
+        self.assertIn("'scope'", self.problems(
+            'parameters: {"scope": {"description": "d", "required": true}}\n'))
 
-    def test_every_parameter_is_required_or_defaulted(self) -> None:
-        for archetype in self.loaded():
-            for name, spec in archetype.parameters.items():
-                self.assertTrue(spec.get("required") or "default" in spec,
-                                f"{archetype.name}: {name} is neither")
-                self.assertTrue(spec.get("description"), f"{archetype.name}: {name}")
+    def test_a_parameter_that_is_neither_required_nor_defaulted(self) -> None:
+        self.assertIn("neither", self.problems(
+            'parameters: {"scope": {"description": "d"}}\n',
+            body="Stay inside {scope}. " * 40))
 
-    def test_a_return_schema_can_say_it_failed(self) -> None:
-        """Without somewhere to put it, a child that cannot do the job
-        improvises prose and the parent's parse breaks."""
-        for archetype in self.loaded():
-            if not archetype.returns:
-                continue
-            self.assertEqual(archetype.returns.get("type"), "object", archetype.name)
-            self.assertIn("failed", archetype.returns.get("properties", {}),
-                          f"{archetype.name}: no shape for failure")
+    def test_a_return_schema_with_nowhere_to_put_a_failure(self) -> None:
+        self.assertIn("failure", self.problems(
+            'returns: {"type": "object", "properties": {"answer": {"type": "string"}}}\n'))
 
 
 class Resolution(unittest.TestCase):
@@ -261,6 +265,27 @@ class TheAllowance(unittest.TestCase):
         self.assertIn("mcp__prose__prose_spawn", denied)
         _, permitted = allowance(self.archetype("spawns: true\n"))
         self.assertNotIn("mcp__prose__prose_spawn", permitted)
+
+    def test_the_browser_is_shut_unless_the_file_asked_for_it(self) -> None:
+        """`loop.serve` registers every prose tool the deny list does not shut,
+        so leaving the browser out of an `allow:` line did not withhold it —
+        `skill-designer`, which writes Markdown, held all sixteen."""
+        _, denied = allowance(self.archetype(""))
+        for tool in BROWSER:
+            self.assertIn(f"mcp__prose__{tool}", denied)
+
+    def test_an_archetype_that_asked_for_the_browser_keeps_it(self) -> None:
+        """Which is the test of the rule: `browser-pilot` names them itself."""
+        allowed, denied = allowance(archetypes.load("browser-pilot"))
+        self.assertIn("mcp__prose__browser_text", allowed)
+        self.assertNotIn("mcp__prose__browser_text", denied)
+
+    def test_authoring_is_shut_the_same_way(self) -> None:
+        _, denied = allowance(self.archetype(""))
+        self.assertIn("mcp__prose__prose_archetype_check", denied)
+        allowed, permitted = allowance(self.archetype("allow: prose_archetype_check\n"))
+        self.assertIn("mcp__prose__prose_archetype_check", allowed)
+        self.assertNotIn("mcp__prose__prose_archetype_check", permitted)
 
     def test_what_prose_shuts_is_shut_whatever_the_archetype_says(self) -> None:
         _, denied = allowance(self.archetype("allow: Task\n"))

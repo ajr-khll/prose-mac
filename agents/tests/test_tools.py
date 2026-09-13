@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import unittest
+from unittest import mock
 
 import support
 from prose_agent.tools import (BROWSER, FLAVOURS, flavours, definitions,
@@ -33,11 +35,14 @@ class Naming(unittest.TestCase):
         promised = {
             "prose_ask", "prose_result", "prose_spawn", "prose_read", "prose_wait",
             "prose_send", "prose_answer", "prose_interrupt", "prose_close",
-            "prose_focus", "prose_archetypes", "browser_open", "browser_navigate", "browser_text",
+            "prose_focus", "prose_archetypes", "prose_archetype_check",
+            "browser_open", "browser_navigate", "browser_text",
             "browser_eval", "browser_snapshot", "browser_elements", "browser_find",
             "browser_click", "browser_type", "browser_select", "browser_key",
             "browser_scroll", "browser_back", "browser_forward",
             "browser_console", "browser_network",
+            "prose_schedule", "prose_schedules", "prose_change_schedule",
+            "prose_emit_event",
         }
         self.assertEqual({n.split("__")[-1] for n in tool_names()}, promised)
 
@@ -93,6 +98,17 @@ class Flavours(unittest.TestCase):
                 self.assertEqual(offered, flavours())
                 self.assertTrue(set(FLAVOURS) <= set(offered))
 
+    def test_a_scheduled_roots_children_inherit_the_unattended_ceiling(self) -> None:
+        wire = support.FakeWire({"pane": 2, "session": 2})
+        with support.environment(
+                PROSE_AUTOMATION_RUN="run-1",
+                PROSE_AUTOMATION_DEFINITION="automation-1",
+                PROSE_AUTOMATION_MAX_RUNTIME="60"):
+            run(handler(wire, "prose_spawn")({"task": "read it"}))
+        _method, params = wire.calls[0]
+        self.assertEqual(params["env"]["PROSE_AUTOMATION_RUN"], "run-1")
+        self.assertNotIn("ANTHROPIC_API_KEY", params["env"])
+
 
 class Asking(unittest.TestCase):
     def test_a_question_goes_out_as_an_ask(self) -> None:
@@ -105,9 +121,6 @@ class Asking(unittest.TestCase):
         self.assertEqual(params["choices"], ["scaled", "unscaled"])
         self.assertIn("unscaled reading", result["content"][0]["text"])
 
-
-if __name__ == "__main__":
-    unittest.main()
 
 
 class WhatMustNotBeReachable(unittest.TestCase):
@@ -182,6 +195,28 @@ class WhatMustNotBeReachable(unittest.TestCase):
 
     def test_prose_ask_is_the_way_to_reach_a_person(self) -> None:
         self.assertIn("mcp__prose__prose_ask", tool_names())
+
+    def test_unattended_runs_refuse_questions_and_schedule_mutations(self) -> None:
+        wire = support.FakeWire()
+        with support.environment(PROSE_AUTOMATION_RUN="run-1"):
+            for name, arguments in (
+                ("prose_ask", {"prompt": "wait?"}),
+                ("prose_schedule", {
+                    "title": "x", "task": "x", "trigger": {"kind": "manual"}}),
+                ("prose_schedules", {}),
+            ):
+                with self.assertRaises(ProseError, msg=name):
+                    run(handler(wire, name)(arguments))
+        self.assertEqual(wire.calls, [])
+
+    def test_unattended_archetypes_cannot_autoapprove_mutations(self) -> None:
+        from prose_agent import archetypes
+        from prose_agent.permissions import allowance
+
+        with support.environment(PROSE_AUTOMATION_RUN="run-1"):
+            allowed, denied = allowance(archetypes.load("browser-pilot"))
+        self.assertNotIn("mcp__prose__browser_click", allowed)
+        self.assertIn("mcp__prose__browser_click", denied)
 
 
 class NotDeferred(unittest.TestCase):
@@ -283,3 +318,106 @@ class Withholding(unittest.TestCase):
         # URL it hands the pilot. It stays.
         self.assertNotIn("WebSearch", NO_BROWSER)
         self.assertIn("WebSearch", UNATTENDED)
+
+
+class CheckingAnArchetype(unittest.TestCase):
+    """`prose_archetype_check`, which is the only thing that tells the agent
+    writing a specialist what the runtime will actually give it."""
+
+    GOOD = ('---\nname: tester\ndescription: Use when testing.\n'
+            'allow: Read, prose_result\n'
+            'returns: {"type": "object", "properties": {"failed": {"type": "string"}}}\n'
+            '---\n\n' + 'A body long enough to be worth a pane. ' * 20)
+
+    def check(self, text: str, name: str = "tester") -> dict:
+        result = run(handler(support.FakeWire(), "prose_archetype_check")(
+            {"text": text, "name": name}))
+        return json.loads(result["content"][0]["text"])
+
+    def test_a_clean_draft_comes_back_ok(self) -> None:
+        found = self.check(self.GOOD)
+        self.assertTrue(found["ok"], found["problems"])
+        self.assertIn("browser-pilot", [one["name"] for one in found["existing"]])
+        self.assertTrue(found["roots"])
+
+    def test_the_effective_surface_is_what_the_runtime_registers(self) -> None:
+        """The reason this tool exists. `allow` only auto-approves, and
+        `loop.serve` registers every prose tool the deny list does not shut —
+        neither is visible from reading the header, so an author who trusts
+        their own `allow:` line is wrong about what they built."""
+        effective = self.check(self.GOOD)["effective"]
+        self.assertIn("mcp__prose__prose_result", effective["unattended"])
+        self.assertIn("prose_wait", effective["registered"],
+                      "registered anyway, though the header never asked for it")
+        self.assertNotIn("prose_spawn", effective["registered"],
+                         "spawning is shut unless asked for in writing")
+        self.assertFalse([name for name in effective["registered"]
+                          if name.startswith("browser_")])
+
+    def test_a_draft_that_would_be_skipped_at_load_says_so(self) -> None:
+        """`catalogue` skips a file it cannot parse, with one line on stderr.
+        Without this the author's next signal is a specialist that is absent."""
+        found = self.check("no frontmatter here")
+        self.assertFalse(found["ok"])
+        self.assertTrue(found["problems"])
+        self.assertNotIn("effective", found,
+                         "there is no allowance to report for a file that "
+                         "would never load")
+
+
+class TheCatalogueIsVisible(unittest.TestCase):
+    """Every flavour's routing line reaches the parent inside `prose_spawn`'s
+    description.
+
+    The regression this pins: the catalogue was a bare `enum` of names, so a
+    specialist the prompt did not separately name was a token with no meaning
+    attached. `browser-pilot` still got used, because two paragraphs of the
+    system prompt are about it; `skill-designer` and `archetype-designer`,
+    which the model could only identify by spending a `prose_archetypes`
+    round-trip, did not. A routing rule the parent cannot see does not route.
+    """
+
+    def spawn_description(self) -> str:
+        for name, description, _, _ in definitions(support.FakeWire()):
+            if name == "prose_spawn":
+                return description
+        self.fail("prose_spawn is not registered")
+
+    def test_every_spawnable_flavour_describes_itself(self) -> None:
+        from prose_agent.tools import flavours
+
+        described = self.spawn_description()
+        for flavour in flavours():
+            self.assertIn(f"- {flavour}:", described,
+                          f"{flavour} is spawnable but says nothing about when "
+                          f"to reach for it")
+
+    def test_an_archetype_carries_its_own_description_verbatim(self) -> None:
+        """Not a paraphrase written here — the file's `description` is the one
+        place a routing rule is authored, and `lint` is what holds it to a
+        length the parent can afford."""
+        from prose_agent import archetypes
+
+        described = self.spawn_description()
+        for archetype in archetypes.catalogue().values():
+            self.assertIn(archetype.description, described)
+
+    def test_a_dropped_in_archetype_appears_without_a_code_change(self) -> None:
+        """`flavours` is read per call so that a file in `$PROSE_ARCHETYPES` is
+        the whole of adding an expert. The description has to follow it, or a
+        dropped-in specialist is invisible in exactly the way this fixes."""
+        from prose_agent import archetypes
+        from prose_agent.tools import catalogue_lines
+
+        body = "x" * 700
+        drafted = archetypes.Archetype(
+            name="ledger-clerk", description="Use when the books need reading.",
+            body=body)
+        with mock.patch.object(archetypes, "catalogue",
+                               return_value={"ledger-clerk": drafted}):
+            self.assertIn("- ledger-clerk: Use when the books need reading.",
+                          catalogue_lines())
+
+
+if __name__ == "__main__":
+    unittest.main()

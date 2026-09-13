@@ -123,6 +123,7 @@ private struct TabList: View {
 
 /// A full-width hairline inset from the divider, then the settings row.
 private struct SidebarFooter: View {
+    @Environment(Workspace.self) private var workspace
     @Environment(\.metrics) private var m
 
     var body: some View {
@@ -134,9 +135,9 @@ private struct SidebarFooter: View {
                 .frame(height: m.px(.hairline))
                 .padding(.trailing, m.px(.dividerGap))
 
-            // The settings button does nothing — there is nowhere for settings
-            // to go yet (spec §6.6, spec §13.2).
-            IconButton(symbol: "gearshape", scale: m.zoom) {}
+            IconButton(symbol: "gearshape", scale: m.zoom) {
+                workspace.automationPanelPresented = true
+            }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.leading, m.px(.settingsCenterX - .buttonSize / 2))
                 .frame(height: m.px(.footerHeight))

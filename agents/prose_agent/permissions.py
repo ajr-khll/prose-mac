@@ -12,12 +12,13 @@ that translate it.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from .asking import Asker
 from .harness import _label
-from .tools import BROWSER
+from .tools import AUTHORING, AUTOMATION, BROWSER
 from .wire import ProseError
 
 if TYPE_CHECKING:
@@ -130,6 +131,11 @@ INVISIBLE = [
 #: skip its own loop.
 NO_BROWSER = list(BROWSER) + ["WebFetch"]
 
+#: Archetype authoring, withheld from the agents that should be *spawning* a
+#: specialist rather than writing one. `prose_archetype_check` belongs to
+#: `archetype-designer`, whose pane holds the guide that gives it meaning.
+NO_AUTHORING = list(AUTHORING)
+
 #: How much of an argument fits on a card before it stops being readable. The
 #: activity row above it already carries the whole thing.
 WIDTH = 120
@@ -172,6 +178,11 @@ class Permissions:
 
     async def decide(self, tool: str, arguments: dict) -> Decision:
         """Allowed or not, and why not — without touching the SDK."""
+        if os.environ.get("PROSE_AUTOMATION_RUN"):
+            return Decision(
+                False,
+                "This is an unattended automation and that capability was not "
+                "pre-approved. The run was stopped safely.")
         key = grant(tool, arguments)
         if key in self._always:
             return Decision(True)
@@ -255,11 +266,59 @@ def allowance(archetype: "Archetype") -> tuple[list[str], list[str]]:
     ask, and for a narrow expert reaching outside its job that is exactly the
     outcome you want — a surprise that is visible rather than silent.
     """
+    from . import apps
     from .tools import qualify
 
     allowed = qualify(archetype.allow) if archetype.allow else list(UNATTENDED)
+    if archetype.integrations:
+        # `apps_*` live on their own MCP server, registered only for a pane
+        # whose archetype declared providers, so they need their own namespace
+        # pass — `tools.qualify` has never heard of them and would leave them
+        # bare, which the SDK ignores rather than refuses.
+        allowed = apps.qualify(allowed, archetype.integrations)
 
     denied = list(INVISIBLE) + qualify(archetype.deny)
+    # Specialists receive event data as work, not authority to install more
+    # durable work. General pane and code agents remain able to propose it.
+    denied += qualify(AUTOMATION)
+    # Shut unless the file asked for them by name. Both are capabilities a
+    # narrow expert acquires by accident otherwise: `loop.serve` registers
+    # every prose tool this list does not deny, so leaving the browser out of
+    # an `allow:` line did **not** withhold it — `skill-designer`, which writes
+    # Markdown, held all sixteen browser tools. `browser-pilot` names them in
+    # its own allowance and is unaffected, which is the test of the rule.
+    denied += [name for name in qualify([*BROWSER, *AUTHORING])
+               if name not in allowed]
+    if os.environ.get("PROSE_AUTOMATION_RUN"):
+        # An archetype's `allow` can contain mutation tools that normally run
+        # without a card. There is nobody to answer a card in a scheduled run,
+        # and no durable-grant editor yet, so unattended descendants get the
+        # same read-only ceiling as their root. Pane supervision remains: the
+        # root can still delegate research and collect a result.
+        safe_builtins = set(UNATTENDED)
+        denied += [name for name in archetype.allow if name not in safe_builtins]
+        denied += qualify(["prose_ask", *AUTOMATION, *BROWSER])
+        allowed = [name for name in allowed
+                   if name in safe_builtins
+                   or name.rsplit("__", 1)[-1] in {
+                       "prose_spawn", "prose_archetypes", "prose_read",
+                       "prose_wait", "prose_send", "prose_answer",
+                       "prose_interrupt", "prose_close", "prose_focus",
+                       "prose_result",
+                   }]
+    if archetype.integrations:
+        # **Always a card, whatever the file says.** `apps_commit` is the only
+        # tool in the connector surface that changes something other people can
+        # see — a message sent, an issue moved, a page rewritten — and v1 buys
+        # that safety with a person rather than with cleverness. An archetype
+        # naming it in `allow:` is asking to send without being asked, so the
+        # request is dropped here rather than honoured. Everything before the
+        # commit (`prepare` included, which writes nothing remote) stays
+        # unattended, so the card arrives once, at the moment it means
+        # something, with the preview text already settled.
+        gated = apps.qualify(list(apps.ALWAYS_GATED), archetype.integrations)
+        allowed = [name for name in allowed if name not in gated]
+
     if not archetype.spawns:
         # A narrow expert that can spawn a wide one has everything it was
         # denied, one pane away. Descendant containment does not catch it —

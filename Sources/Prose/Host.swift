@@ -6,8 +6,10 @@
 
 import AppKit
 import Foundation
+import ProseAutomation
 import ProseCore
 import ProseHost
+import ProseIntegrations
 import SwiftUI
 
 extension Workspace {
@@ -79,6 +81,10 @@ extension Workspace {
                 self.agent(pane)?.notice(notice)
                 // Anyone parked on this child is owed the news.
                 self.registry.progress(reserved.id, .exit)
+                self.finishAutomation(
+                    session: reserved.id,
+                    state: .failed,
+                    error: notice)
             }
         }
 
@@ -100,9 +106,21 @@ extension Workspace {
             // something finished and then has to ask again what it was.
             if case .turn(let state, _) = event, state != .started {
                 registry.progress(session, .turn)
+                switch state {
+                case .ended:
+                    finishAutomation(session: session, state: .succeeded)
+                case .failed:
+                    let error: String? = {
+                        if case .turn(_, let error) = event { return error }
+                        return nil
+                    }()
+                    finishAutomation(session: session, state: .failed, error: error)
+                case .started:
+                    break
+                }
             }
 
-        case .ask(let session, let id, let prompt, let choices, let placeholder):
+        case .ask(let session, let id, let prompt, let choices, let placeholder, let secret):
             // A subagent's question goes to whoever spawned it first. The card
             // is drawn either way — the user seeing what is being decided is
             // worth more than being asked to decide it — but while a parent
@@ -111,7 +129,7 @@ extension Workspace {
             let supervisor = parent.flatMap { registry.pane(of: $0) }
             agentFor(session)?.ask(
                 id: id, prompt: prompt, choices: choices, placeholder: placeholder,
-                supervisor: supervisor)
+                secret: secret, supervisor: supervisor)
 
             if let parent, let pane = registry.pane(of: session) {
                 registry.send(
@@ -225,7 +243,86 @@ extension Workspace {
 
         case .browser(let request, let requester, let pane, let call):
             drive(pane, call, request: request, for: requester)
+
+        case .automation(let request, let requester, let call):
+            handleAutomation(request: request, requester: requester, call: call)
+
+        case .integration(let request, let requester, let operation,
+                          let providers, let arguments):
+            handleIntegration(
+                request: request, requester: requester, operation: operation,
+                providers: providers, arguments: arguments)
         }
+    }
+
+    /// One brokered provider call.
+    ///
+    /// Every refusal comes back as a `failure` carrying the broker's own
+    /// sentence rather than a code, because the reader is a model deciding
+    /// what to do next: "Slack is not connected — ask the person" and "that
+    /// prepared change expired" lead to completely different behaviour, and a
+    /// generic error leads to a retry of something that will never work.
+    private func handleIntegration(
+        request: RequestID, requester: SessionID, operation: String,
+        providers: [String], arguments: JSONValue
+    ) {
+        let broker = integrations
+        Task {
+            do {
+                let value = try await broker.call(
+                    operation: operation, providers: providers,
+                    arguments: arguments)
+                registry.send(.reply(id: request, result: value), to: requester)
+            } catch {
+                registry.send(
+                    .failure(id: request, message: error.localizedDescription),
+                    to: requester)
+            }
+        }
+    }
+
+    private func handleAutomation(
+        request: RequestID, requester: SessionID, call: AutomationCall
+    ) {
+        guard let automations else {
+            registry.send(
+                .failure(id: request, message: "automation service is unavailable"),
+                to: requester)
+            return
+        }
+        Task {
+            do {
+                let value: JSONValue
+                switch call {
+                case .create(let proposal):
+                    value = try await automations.create(proposal).definition.json
+                case .list:
+                    await automations.reload()
+                    value = automations.json
+                case .change(let rawID, let action):
+                    guard let id = UUID(uuidString: rawID) else {
+                        throw AutomationError.invalid("invalid automation id")
+                    }
+                    value = try await automations.change(id: id, action: action)
+                case .emit(let event):
+                    let runs = try await automations.ingest(event)
+                    value = .object([
+                        "accepted": .bool(true),
+                        "runs": .array(runs.map(\.json)),
+                    ])
+                }
+                registry.send(.reply(id: request, result: value), to: requester)
+            } catch {
+                registry.send(
+                    .failure(id: request, message: error.localizedDescription), to: requester)
+            }
+        }
+    }
+
+    func finishAutomation(session: SessionID, state: RunState, error: String? = nil) {
+        guard let run = automationRuns.removeValue(forKey: session) else { return }
+        automationTimeouts.removeValue(forKey: session)?.cancel()
+        automations?.complete(run, state: state, error: error)
     }
 
     /// Runs one browser call and answers it when WebKit does.
@@ -389,6 +486,7 @@ extension Workspace {
     /// Closing a pane closes its session, which tells the agent first.
     func endSession(for pane: PaneID) {
         guard let session = registry.session(for: pane) else { return }
+        finishAutomation(session: session, state: .cancelled, error: "pane closed")
         registry.close(session)
     }
 }

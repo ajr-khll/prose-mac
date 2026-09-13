@@ -25,13 +25,50 @@ _NO_CREDENTIALS = (
 )
 
 
+def auto_approved(declared: list[str] | None, server: str,
+                  omit: tuple[str, ...] | list[str], confine: bool) -> list[str]:
+    """The final `allowed_tools`: what runs without raising a card.
+
+    `allowed_tools` auto-approves; it does not restrict. A prose tool missing
+    from it falls through to permission evaluation — which with a `can_use_tool`
+    installed is an ask card for `prose_wait`, and without one is a hang. For a
+    general pane agent that is pure friction, so every registered tool goes on.
+
+    For an archetype it is the whole point, and this is where `allow:` stopped
+    meaning anything: the widening used to happen unconditionally, *after*
+    `permissions.allowance` had composed a careful list, so `archetype-designer`
+    — which names seven tools — ran auto-approved for `prose_close`,
+    `prose_send` and `prose_interrupt` too. `deny` was the only real boundary,
+    and every capability added to `tools.py` was reachable by every archetype
+    until somebody remembered to deny it. Under `confine` the declaration is
+    the answer, which is what an allowance has to mean before one of these
+    holds a credential that can write to Slack.
+    """
+    already = list(declared or [])
+    if confine:
+        return already
+    return already + tool_names(server, omit=omit)
+
+
 async def serve(options: Any, name: str = "agent", server: str = "prose",
-                asker: Asker | None = None) -> None:
+                asker: Asker | None = None, confine: bool = False,
+                integrations: tuple[str, ...] | list[str] = ()) -> None:
     """Runs one pane's agent until prose closes it.
 
     `asker` is the one the caller already handed to its permission callback,
     if it has one. The same instance has to reach the tools, because it is the
     lock that keeps two questions from being outstanding at once (§8).
+
+    `confine` says the caller's `allowed_tools` is the whole answer for prose's
+    own tools and must not be widened here. An archetype sets it, because its
+    `allow:` line is a declaration; a general pane agent does not, because it
+    has no declaration to be measured against and every registered tool is
+    legitimately its own.
+
+    `integrations` is the provider set from an archetype's header, and the only
+    thing that puts the `apps_*` server in a pane. It is empty everywhere else
+    — `pane_agent` and `code_agent` pass nothing — so a general agent has no
+    connector tools to reach for and no schema cost for them.
     """
     from claude_agent_sdk import ClaudeSDKClient
 
@@ -72,13 +109,17 @@ async def serve(options: Any, name: str = "agent", server: str = "prose",
     options.mcp_servers = {**(getattr(options, "mcp_servers", None) or {}),
                            server: mcp_server(wire, name=server, asker=asker,
                                               omit=omit)}
-    # **Unconditional.** `allowed_tools` is an auto-approve list, not a
-    # restriction, so a prose tool missing from it falls through to permission
-    # evaluation — which with a `can_use_tool` installed means an ask card
-    # asking the user's permission for `prose_wait`, and without one is a hang.
-    options.allowed_tools = (
-        list(getattr(options, "allowed_tools", None) or [])
-        + tool_names(server, omit=omit))
+    if integrations:
+        # Built here rather than by the caller because it needs `wire`, which
+        # does not exist until this function has connected. The provider set
+        # is closed over, so a provider outside it is refused in-process
+        # before anything reaches the broker.
+        from .apps import mcp_server as apps_server
+
+        options.mcp_servers["apps"] = apps_server(wire, integrations,
+                                                  asker=asker)
+    options.allowed_tools = auto_approved(
+        getattr(options, "allowed_tools", None), server, omit, confine)
 
     try:
         await _converse(ClaudeSDKClient(options=options), wire, events, asker)
@@ -238,9 +279,12 @@ def _plainly(names: list[str]) -> list[str]:
     return [name.rsplit("__", 1)[-1] for name in names]
 
 
-def run(options: Any, name: str = "agent", asker: Asker | None = None) -> None:
+def run(options: Any, name: str = "agent", asker: Asker | None = None,
+        confine: bool = False,
+        integrations: tuple[str, ...] | list[str] = ()) -> None:
     """`serve`, for a script that just wants to start."""
     try:
-        asyncio.run(serve(options, name=name, asker=asker))
+        asyncio.run(serve(options, name=name, asker=asker, confine=confine,
+                          integrations=integrations))
     except (KeyboardInterrupt, ProseError):
         pass

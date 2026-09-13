@@ -95,7 +95,7 @@ private struct BlockView: View {
                 .foregroundStyle(Color(Palette.noticeText))
 
         // The placeholder is the composer's to draw (spec §9.4), not the card's.
-        case .ask(_, let prompt, let choices, _, let answer, let supervisor):
+        case .ask(_, let prompt, let choices, _, let answer, _, let supervisor):
             AskCard(
                 prompt: prompt, choices: choices, answer: answer, supervisor: supervisor,
                 session: session)

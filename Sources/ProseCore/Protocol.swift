@@ -74,7 +74,8 @@ public enum Call: Sendable, Equatable {
     case setTitle(pane: PaneID, title: String)
 
     /// Stop and ask the user something. Stays pending until they answer.
-    case ask(session: SessionID, prompt: String, choices: [String], placeholder: String?)
+    case ask(session: SessionID, prompt: String, choices: [String],
+             placeholder: String?, secret: Bool)
 
     /// Say something to another session — a parent talking to a subagent.
     case message(to: SessionID, text: String)
@@ -146,6 +147,30 @@ public enum Call: Sendable, Equatable {
     /// them: the console says the page's code is unhappy, the network says
     /// the server is.
     case browserNetwork(pane: PaneID, since: Int, failuresOnly: Bool, limit: Int?)
+
+    /// Durable work owned by prose rather than by this process. The payload is
+    /// kept as JSON here so an older host can continue ignoring newer trigger
+    /// or policy fields without making the base wire depend on automation.
+    case automationCreate(definition: JSONValue)
+    case automationList(includeRuns: Bool)
+    case automationChange(id: String, action: String)
+    case automationEmit(event: JSONValue)
+
+    /// One call to a third-party provider, brokered by the host.
+    ///
+    /// Deliberately *one* method rather than seven. The agent-side surface is
+    /// seven tools because a model needs the operations named and schema'd
+    /// separately, but on the wire they are the same request — an operation, a
+    /// provider set and arguments — and the host validates all three. Widening
+    /// the wire would mean a second place that has to agree about which
+    /// provider a pane may reach, and two such places drift.
+    ///
+    /// `providers` is what the *pane's archetype* declared, sent so the host
+    /// can check it against its own record rather than trusting it. A pane
+    /// claiming a provider its archetype never declared is refused.
+    case integrationCall(
+        session: SessionID, operation: String, providers: [String],
+        arguments: JSONValue)
 
     /// This session's return value, routed to whoever spawned it.
     case result(session: SessionID, value: JSONValue)
@@ -457,7 +482,11 @@ private func parseCall(_ method: String, _ params: JSONValue) -> Call? {
             session: session,
             prompt: prompt,
             choices: params["choices"]?.stringArray ?? [],
-            placeholder: params["placeholder"]?.string
+            placeholder: params["placeholder"]?.string,
+            // Absent means not a credential, which is the safe default only
+            // because the masking is additive: a question wrongly marked
+            // secret is unreadable, one wrongly left plain is a leak.
+            secret: params["secret"]?.bool ?? false
         )
 
     case "message":
@@ -578,6 +607,33 @@ private func parseCall(_ method: String, _ params: JSONValue) -> Call? {
         return .browserScroll(
             pane: pane, ref: params["ref"]?.string, to: params["to"]?.string,
             by: params["by"]?.int.map(Int.init))
+
+    case "automation.create":
+        guard let definition = params["definition"] else { return nil }
+        return .automationCreate(definition: definition)
+
+    case "automation.list":
+        return .automationList(includeRuns: params["include_runs"]?.bool ?? false)
+
+    case "automation.change":
+        guard let id = params["id"]?.string,
+              let action = params["action"]?.string,
+              ["pause", "resume", "delete", "run_now"].contains(action)
+        else { return nil }
+        return .automationChange(id: id, action: action)
+
+    case "automation.emit":
+        guard let event = params["event"] else { return nil }
+        return .automationEmit(event: event)
+
+    case "integration.call":
+        guard let session = params["session"]?.unsigned,
+              let operation = params["operation"]?.string,
+              let providers = params["providers"]?.stringArray
+        else { return nil }
+        return .integrationCall(
+            session: session, operation: operation, providers: providers,
+            arguments: params["arguments"] ?? .null)
 
     case "result":
         guard let session = params["session"]?.unsigned else { return nil }

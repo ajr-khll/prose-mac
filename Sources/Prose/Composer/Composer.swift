@@ -32,6 +32,25 @@ final class ComposerTextView: NSTextView {
     /// How tall the box may grow before it scrolls instead.
     var maximumHeight: CGFloat = .greatestFiniteMagnitude
 
+    /// Whether what is being typed is a credential, and so is drawn as bullets.
+    ///
+    /// `NSTextView` has no `isSecure` — that is `NSSecureTextField`, which is
+    /// single-line and would mean swapping the whole composer out for one
+    /// question. So the storage keeps the real characters, which is what
+    /// `text` and therefore the answer read, and only the *drawing* is
+    /// replaced. `NSLayoutManager` asks its delegate for a replacement glyph,
+    /// which is the seam that exists for exactly this.
+    var masksInput: Bool = false {
+        didSet {
+            guard masksInput != oldValue else { return }
+            // A mask that turns on after something is typed has to repaint
+            // what is already there.
+            layoutManager?.invalidateDisplay(
+                forCharacterRange: NSRange(location: 0, length: string.count))
+            needsDisplay = true
+        }
+    }
+
     /// What an empty composer says, and in what colour (spec §9.4).
     var placeholder = "" {
         didSet { needsDisplay = true }
@@ -276,6 +295,15 @@ struct Composer: NSViewRepresentable {
     /// know the view needs updating at all.
     let placeholder: String
 
+    /// Whether the outstanding question is asking for a credential.
+    ///
+    /// Passed as a value for the same reason `placeholder` is: `updateNSView`
+    /// is not a `body` and establishes no observation, so SwiftUI has to see
+    /// this change to know the view needs updating at all. When it is set the
+    /// text view echoes bullets — an `NSTextView` has no `isSecure`, so it is
+    /// done in `ComposerTextView` rather than had for free.
+    let secret: Bool
+
     /// How tall one line of the composer's font is, spacing aside.
     ///
     /// spec §5's 1.45 is the distance *between* lines, so it says nothing about
@@ -318,6 +346,8 @@ struct Composer: NSViewRepresentable {
         manager.addTextContainer(container)
 
         let view = ComposerTextView(frame: .zero, textContainer: container)
+        // The seam that makes masking possible without touching the storage.
+        manager.delegate = view
         view.delegate = context.coordinator
         view.isRichText = false
         view.isEditable = true
@@ -432,6 +462,7 @@ struct Composer: NSViewRepresentable {
     func updateNSView(_ scroll: NSScrollView, context: Context) {
         guard let view = scroll.documentView as? ComposerTextView else { return }
         apply(metrics, to: view)
+        view.masksInput = secret
         // Focus is deliberately *not* chased here. A redraw is not an
         // event about the keyboard: a request read on one left the caret being
         // pulled back out of whatever the user had moved to since, and a request
@@ -504,5 +535,60 @@ struct Composer: NSViewRepresentable {
             session.composerIsEmpty = view.string.isEmpty
             session.composerHeight = view.boxHeight
         }
+    }
+}
+
+
+/// Masking, done by swapping glyphs rather than characters.
+///
+/// The text storage keeps exactly what was typed — which is what `string`, the
+/// answer and the undo stack all read — and only the glyphs handed to the
+/// typesetter are replaced. That is why paste, select-all, delete and undo all
+/// behave normally while the field is masked: none of them ever see a bullet.
+///
+/// The alternative, keeping a shadow copy of the real text and displaying
+/// bullets, has to intercept every way characters can arrive. This has to
+/// intercept none of them.
+extension ComposerTextView: @MainActor NSLayoutManagerDelegate {
+    // Layout runs on the main actor with the view it is laying out, which the
+    // protocol predates saying.
+    nonisolated func layoutManager(
+        _ layoutManager: NSLayoutManager,
+        shouldGenerateGlyphs glyphs: UnsafePointer<CGGlyph>,
+        properties: UnsafePointer<NSLayoutManager.GlyphProperty>,
+        characterIndexes: UnsafePointer<Int>,
+        font: NSFont,
+        forGlyphRange glyphRange: NSRange
+    ) -> Int {
+        // Zero means "you decide", which is the normal path and has to stay
+        // the cheap one: this is called for every layout of every keystroke.
+        guard MainActor.assumeIsolated({ masksInput }), glyphRange.length > 0
+        else { return 0 }
+
+        var bullet: CGGlyph = 0
+        var character: UniChar = 0x2022  // •
+        guard CTFontGetGlyphsForCharacters(font, &character, &bullet, 1) else {
+            return 0
+        }
+
+        let masked = [CGGlyph](repeating: bullet, count: glyphRange.length)
+        let unchanged = Array(
+            UnsafeBufferPointer(start: properties, count: glyphRange.length))
+        let indexes = Array(
+            UnsafeBufferPointer(start: characterIndexes, count: glyphRange.length))
+
+        masked.withUnsafeBufferPointer { glyphBuffer in
+            unchanged.withUnsafeBufferPointer { propertyBuffer in
+                indexes.withUnsafeBufferPointer { indexBuffer in
+                    layoutManager.setGlyphs(
+                        glyphBuffer.baseAddress!,
+                        properties: propertyBuffer.baseAddress!,
+                        characterIndexes: indexBuffer.baseAddress!,
+                        font: font,
+                        forGlyphRange: glyphRange)
+                }
+            }
+        }
+        return glyphRange.length
     }
 }

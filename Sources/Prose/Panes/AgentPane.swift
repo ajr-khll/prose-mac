@@ -136,9 +136,20 @@ final class AgentSession {
     /// value the composer is handed rather than something overlaid on it.
     var composerPlaceholder: String {
         guard isAnsweringByTyping,
-              case .ask(_, _, _, let placeholder, _, _)? = transcript.pendingAsk
+              case .ask(_, _, _, let placeholder, _, _, _)? = transcript.pendingAsk
         else { return "Ask anything…" }
         return placeholder ?? "Answer…"
+    }
+
+    /// Whether the outstanding question is asking for a credential.
+    ///
+    /// Drives the composer's masking. Read from the block rather than
+    /// remembered separately, so a pane restored mid-question cannot come back
+    /// with the mask off.
+    var isAnsweringSecret: Bool {
+        guard case .ask(_, _, _, _, let answer, let secret, _)? = transcript.pendingAsk
+        else { return false }
+        return secret && answer == nil
     }
 
     /// A click on one of an ask card's buttons.
@@ -172,11 +183,11 @@ final class AgentSession {
     /// asking the user to do something.
     func ask(
         id: RequestID, prompt: String, choices: [String], placeholder: String?,
-        supervisor: PaneID? = nil
+        secret: Bool = false, supervisor: PaneID? = nil
     ) {
         transcript.pushAsk(
             id: id, prompt: prompt, choices: choices, placeholder: placeholder,
-            supervisor: supervisor)
+            secret: secret, supervisor: supervisor)
         follow = true
         revision += 1
     }
@@ -194,7 +205,7 @@ final class AgentSession {
     /// The pane deciding the outstanding question, when it is not the user's to
     /// decide yet. Drives both the card and whether Enter is claimed.
     var supervisedAsk: PaneID? {
-        guard case .ask(_, _, _, _, let answer, let supervisor)? = transcript.pendingAsk,
+        guard case .ask(_, _, _, _, let answer, _, let supervisor)? = transcript.pendingAsk,
               answer == nil
         else { return nil }
         return supervisor
@@ -391,7 +402,8 @@ struct AgentPaneBody: View {
 
                 Composer(
                     session: session, metrics: m,
-                    placeholder: session.composerPlaceholder
+                    placeholder: session.composerPlaceholder,
+                    secret: session.isAnsweringSecret
                 )
                     // The floor is what the box is before the text view has
                     // measured itself, so it has to be a real line: 1.45 × the

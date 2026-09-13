@@ -17,6 +17,9 @@ primitives prose's own agent will stand on.
 - [`reference/agent-guide.md`](reference/agent-guide.md) — the contract for the agent that runs
   inside a pane: the tool surface, what each call costs, and the mistakes a fresh agent makes by
   default.
+- [`reference/scheduling-plan.md`](reference/scheduling-plan.md) — a staged design for durable
+  one-time, recurring and event-driven agent work, including background execution, permissions,
+  retries and run history.
 - [`CLAUDE.md`](CLAUDE.md) — conventions, and where to start.
 
 The short version of why: in gpui a browser pane meant an opaque native surface floating above the

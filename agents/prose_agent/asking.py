@@ -45,7 +45,8 @@ class Asker:
         self._wire = wire
 
     async def ask(self, prompt: str, choices: list[str] | None = None,
-                  placeholder: str | None = None, timeout: float = PATIENCE) -> str:
+                  placeholder: str | None = None, timeout: float = PATIENCE,
+                  secret: bool = False) -> str:
         """Put a question in the pane and wait for whoever answers it.
 
         Serialised rather than refused when a second one arrives: the second
@@ -61,6 +62,14 @@ class Asker:
                 params["choices"] = choices
             if placeholder:
                 params["placeholder"] = placeholder
+            if secret:
+                # The composer masks what is typed and the transcript records
+                # dots instead of the answer. The answer still comes back here
+                # in full — this is about what is left behind, because a
+                # transcript gets scrolled through, screenshotted and pasted
+                # into conversations, and a credential in one is a credential
+                # to revoke.
+                params["secret"] = True
 
             # Held as a future so `abandon` can reach it. Awaiting directly
             # would leave nothing to cancel when the person presses Escape.

@@ -77,6 +77,23 @@ BROWSER = (
     "browser_eval", "browser_snapshot", "browser_console", "browser_network",
 )
 
+#: Durable automation is available to the general personal and coding agents,
+#: but not to narrow archetypes. `permissions.allowance` adds these names to an
+#: archetype's deny list, which also makes `loop.serve` omit their schemas.
+AUTOMATION = (
+    "prose_schedule", "prose_schedules", "prose_change_schedule",
+    "prose_emit_event",
+)
+
+#: Checking an archetype, which only the archetype that writes them needs.
+#:
+#: Withheld the way `BROWSER` is, and for the same reason rather than a
+#: security one: a tool nobody in this pane will call still costs its schema on
+#: every turn, and it invites a general agent to start authoring specialists
+#: instead of spawning one. `permissions.allowance` shuts it for any archetype
+#: that has not asked for it in writing.
+AUTHORING = ("prose_archetype_check",)
+
 
 def flavours() -> list[str]:
     """What `prose_spawn` will accept, built-ins and archetypes together.
@@ -85,6 +102,43 @@ def flavours() -> list[str]:
     `$PROSE_ARCHETYPES` and reopening a pane is the whole of adding an expert.
     """
     return sorted(set(FLAVOURS) | set(archetypes.catalogue()))
+
+
+#: What the two built-in flavours are, in the same one-line shape an archetype
+#: describes itself in, so `catalogue_lines` can render one list rather than a
+#: list and an exception.
+BUILT_IN_DESCRIPTIONS = {
+    "prose": "Another personal agent like you, with the same broad remit. Use "
+             "when the job is a whole errand rather than one speciality.",
+    "code": "A coding agent with the file and shell conventions for a "
+            "repository. Use when the job is reading or changing code — pass "
+            "`cwd`.",
+}
+
+
+def catalogue_lines() -> str:
+    """One line per flavour — a name and its description — for `prose_spawn`'s
+    own tool description.
+
+    This is the half of the archetype economy that has to sit in the parent's
+    context. The body of an archetype never does: it loads into the child's
+    pane and the parent never reads it. But the *description* is a routing
+    rule, and a routing rule the parent cannot see does not route. Left as a
+    bare `enum` of names, a specialist is a token the model has no reason to
+    reach for, because finding out what it does costs a `prose_archetypes`
+    round-trip it only makes when it already suspects the answer — which is
+    why `browser-pilot` gets used (two paragraphs of prompt name it) and
+    `skill-designer`, named nowhere, never did.
+
+    The cost is roughly fifty tokens per archetype per turn. That is the price
+    of the catalogue being usable at all, and it is what `archetypes.py`'s
+    header has always claimed is paid.
+    """
+    described = dict(BUILT_IN_DESCRIPTIONS)
+    for name, archetype in archetypes.catalogue().items():
+        described[name] = archetype.description
+    return "\n".join(f"- {name}: {described[name]}"
+                      for name in flavours() if name in described)
 
 
 def argv(flavour: str, params: dict | None) -> list[str]:
@@ -184,6 +238,10 @@ def definitions(wire: Wire, asker: Asker | None = None,
         # permission prompt raised by a parallel tool call cannot land on top
         # of this one. A question is answered by a person, so there is no
         # useful timeout — `asking.PATIENCE` is a day.
+        if os.environ.get("PROSE_AUTOMATION_RUN"):
+            raise ProseError(
+                "an unattended automation cannot wait for a user answer; "
+                "return a useful failure instead")
         return _text(await asking.ask(
             prompt=args["prompt"],
             choices=args.get("choices") or None,
@@ -191,6 +249,12 @@ def definitions(wire: Wire, asker: Asker | None = None,
 
     async def spawn(args: dict) -> dict:
         command = argv(args.get("flavour") or "prose", args.get("params"))
+        inherited = {
+            key: value for key in (
+                "PROSE_AUTOMATION_RUN", "PROSE_AUTOMATION_DEFINITION",
+                "PROSE_AUTOMATION_MAX_RUNTIME")
+            if (value := os.environ.get(key))
+        }
         created = await wire.call(
             "pane.create",
             {
@@ -200,6 +264,7 @@ def definitions(wire: Wire, asker: Asker | None = None,
                 "command": command,
                 "cwd": args.get("cwd"),
                 "title": args.get("title"),
+                "env": inherited,
             },
         )
         pane = created.get("pane")
@@ -221,6 +286,39 @@ def definitions(wire: Wire, asker: Asker | None = None,
             }
             for _, archetype in sorted(archetypes.catalogue().items())
         ])
+
+    async def check_archetype(args: dict) -> dict:
+        # Local, and needing no wire: an archetype is a file, and the whole
+        # point of checking one is doing it *before* the file exists. So this
+        # takes the text rather than a path, and the write card is raised on
+        # something that has already come back clean.
+        from .permissions import allowance
+
+        text, name = args["text"], args["name"]
+        problems = archetypes.lint(text, name)
+        found = {
+            "ok": not problems,
+            "problems": problems,
+            "existing": [{"name": other.name, "description": other.description}
+                         for _, other in sorted(archetypes.catalogue().items())],
+            "roots": [str(root) for root in archetypes.roots()],
+        }
+        if not problems:
+            # The surface the child will **really** have, which is not what its
+            # `allow:` line says: `allowed_tools` only auto-approves, and
+            # `loop.serve` registers every prose tool this does not deny. An
+            # author reading their own header cannot see either of those, and
+            # guide §7 asks for exactly this — the effective options, after the
+            # MCP server and its names have been added.
+            allowed, denied = allowance(archetypes.parse(text, name))
+            plain = [name.rsplit("__", 1)[-1] for name in denied]
+            found["effective"] = {
+                "unattended": allowed,
+                "denied": denied,
+                "registered": [reachable.rsplit("__", 1)[-1]
+                               for reachable in tool_names(omit=plain)],
+            }
+        return _text(found)
 
     async def focus(args: dict) -> dict:
         # A notification, like `prose_close`: `SessionRegistry`'s `.focusPane`
@@ -277,6 +375,66 @@ def definitions(wire: Wire, asker: Asker | None = None,
     async def result(args: dict) -> dict:
         wire.notify("result", {"session": wire.session, "value": args.get("value")})
         return _text({"ok": True})
+
+    def require_interactive() -> None:
+        if os.environ.get("PROSE_AUTOMATION_RUN"):
+            raise ProseError(
+                "an unattended automation cannot create or change durable schedules")
+
+    async def schedule(args: dict) -> dict:
+        require_interactive()
+        proposal = {
+            "title": args["title"],
+            "task": {
+                "prompt": args["task"],
+                "flavour": args.get("flavour", "prose"),
+                "params": args.get("params") or {},
+                "cwd": args.get("cwd"),
+            },
+            "trigger": args["trigger"],
+            "policy": args.get("policy") or {},
+        }
+        trigger = json.dumps(args["trigger"], sort_keys=True)
+        approved = await asking.ask(
+            prompt=f"Create automation {args['title']!r} with trigger {trigger}?",
+            choices=["Create automation", "Cancel"])
+        if approved != "Create automation":
+            raise ProseError("the user cancelled the automation")
+        return _text(await wire.call("automation.create", {"definition": proposal}))
+
+    async def schedules(args: dict) -> dict:
+        require_interactive()
+        return _text(await wire.call(
+            "automation.list", {"include_runs": bool(args.get("include_runs", True))}))
+
+    async def change_schedule(args: dict) -> dict:
+        require_interactive()
+        action = args["action"]
+        label = action.replace("_", " ")
+        approved = await asking.ask(
+            prompt=f"{label.capitalize()} automation {args['id']}?",
+            choices=[label.capitalize(), "Cancel"])
+        if approved != label.capitalize():
+            raise ProseError("the user cancelled the change")
+        return _text(await wire.call("automation.change", {
+            "id": args["id"], "action": action}))
+
+    async def emit_event(args: dict) -> dict:
+        require_interactive()
+        event = {
+            "external_id": args["external_id"],
+            "source": args["source"],
+            "type": args["type"],
+            "subject": args.get("subject"),
+            "payload": args.get("payload"),
+        }
+        approved = await asking.ask(
+            prompt=(f"Emit {args['source']}.{args['type']} event "
+                    f"{args['external_id']!r}?"),
+            choices=["Emit event", "Cancel"])
+        if approved != "Emit event":
+            raise ProseError("the user cancelled the event")
+        return _text(await wire.call("automation.emit", {"event": event}))
 
     async def browser_open(args: dict) -> dict:
         """A page opens **above** the pilot reading it.
@@ -394,12 +552,14 @@ def definitions(wire: Wire, asker: Asker | None = None,
          "Split this pane and start a subagent in the new one with `task`. "
          "Returns its pane and session at once — the child is still starting, "
          "so follow with prose_wait rather than sleeping. `flavour` picks what "
-         "sort of agent: 'prose' is another personal agent like you, 'code' is "
-         "a coding agent with the file and shell conventions for a repository "
-         "— pass `cwd` with it — and the rest are specialists that already "
-         "know their job and cost you none of your own context to run. Some "
-         "take `params`; call prose_archetypes to see what one takes and what "
-         "shape it returns before spawning it.",
+         "sort of agent to open; everything but 'prose' and 'code' is a "
+         "specialist that already knows its job and costs you none of your own "
+         "context to run:\n\n"
+         + catalogue_lines() +
+         "\n\nMatch the request against those descriptions before deciding to "
+         "do a job yourself — a specialist exists because that work does not "
+         "belong in your context. Some take `params`; call prose_archetypes to "
+         "see what one takes and what shape its result has before spawning it.",
          {"type": "object",
           "properties": {
               "task": {"type": "string"},
@@ -422,6 +582,25 @@ def definitions(wire: Wire, asker: Asker | None = None,
          "spawning one you have not used in this conversation.",
          {"type": "object", "properties": {}},
          experts),
+
+        ("prose_archetype_check",
+         "Check the text of an archetype definition before writing it, and see "
+         "the tool surface it would really have. Returns `problems` (empty "
+         "means deployable), `effective.registered` — which is not what the "
+         "`allow:` line says, because that list only auto-approves — plus the "
+         "archetypes that already exist and where the catalogue lives. A file "
+         "that fails to parse is skipped in silence at load, so this is the "
+         "only way to find out.",
+         {"type": "object",
+          "properties": {
+              "text": {"type": "string",
+                       "description": "the whole file, frontmatter and body"},
+              "name": {"type": "string",
+                       "description": "the filename stem it will be saved as, "
+                                      "which the header's `name` must match"},
+          },
+          "required": ["text", "name"]},
+         check_archetype),
 
         ("prose_wait",
          "Wait until a pane's turn ends, it asks a question, or its agent "
@@ -501,6 +680,77 @@ def definitions(wire: Wire, asker: Asker | None = None,
          "the user opened.",
          {"type": "object", "properties": {"value": {}}, "required": ["value"]},
          result),
+
+        ("prose_schedule",
+         "Propose durable agent work that runs once, on an interval, on a local "
+         "calendar rule, from an event, or manually. The user must approve the "
+         "resolved proposal before prose stores it. ISO dates must include an "
+         "offset. Calendar weekdays are 1=Sunday through 7=Saturday.",
+         {"type": "object",
+          "properties": {
+              "title": {"type": "string"},
+              "task": {"type": "string"},
+              "flavour": {"type": "string", "enum": flavours()},
+              "params": {"type": "object"},
+              "cwd": {"type": "string"},
+              "trigger": {
+                  "type": "object",
+                  "description": (
+                      "One of: {kind:'at',at:ISO8601}; "
+                      "{kind:'interval',seconds:int,anchor?:ISO8601}; "
+                      "{kind:'calendar',frequency:'daily'|'weekly'|'monthly',"
+                      "hour:0..23,minute:0..59,timezone:IANA,weekdays?:[1..7],"
+                      "day?:1..31}; {kind:'event',source,type,"
+                      "subject_contains?}; or {kind:'manual'}."),
+              },
+              "policy": {
+                  "type": "object",
+                  "properties": {
+                      "misfire": {"type": "string",
+                                  "enum": ["skip", "runOnce", "catchUp"]},
+                      "catch_up": {"type": "integer"},
+                      "concurrency": {"type": "string",
+                                      "enum": ["queue", "skipWhileRunning", "replace"]},
+                      "maximum_runtime": {"type": "number"},
+                      "maximum_attempts": {"type": "integer"},
+                  },
+              },
+          },
+          "required": ["title", "task", "trigger"]},
+         schedule),
+
+        ("prose_schedules",
+         "List durable automations and recent occurrence history, including "
+         "ids, enabled state, next fire time and run outcome.",
+         {"type": "object",
+          "properties": {"include_runs": {"type": "boolean"}}},
+         schedules),
+
+        ("prose_change_schedule",
+         "Pause, resume, delete, or immediately run a durable automation. The "
+         "user confirms the mutation before it reaches prose.",
+         {"type": "object",
+          "properties": {
+              "id": {"type": "string"},
+              "action": {"type": "string",
+                         "enum": ["pause", "resume", "delete", "run_now"]},
+          },
+          "required": ["id", "action"]},
+         change_schedule),
+
+        ("prose_emit_event",
+         "Insert one idempotent event into prose's automation inbox. Matching "
+         "event schedules run once; reusing source plus external_id is ignored.",
+         {"type": "object",
+          "properties": {
+              "external_id": {"type": "string"},
+              "source": {"type": "string"},
+              "type": {"type": "string"},
+              "subject": {"type": "string"},
+              "payload": {},
+          },
+          "required": ["external_id", "source", "type"]},
+         emit_event),
 
         ("browser_open",
          "Open a browser on `url`, above this pane. You may drive only the "

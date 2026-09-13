@@ -23,8 +23,8 @@ from claude_agent_sdk import ClaudeAgentOptions  # noqa: E402
 from prose_agent import credentials, run, skills
 from prose_agent.tools import NEVER_DEFERRED  # noqa: E402
 from prose_agent.asking import Asker  # noqa: E402
-from prose_agent.permissions import (INVISIBLE, NO_BROWSER, UNATTENDED,
-                                     Permissions)  # noqa: E402
+from prose_agent.permissions import (INVISIBLE, NO_AUTHORING, NO_BROWSER,
+                                     UNATTENDED, Permissions)  # noqa: E402
 
 #: The preset assumes a terminal that renders all of markdown. prose renders
 #: only inline emphasis, so this has to be said again even though
@@ -69,7 +69,7 @@ def main() -> None:
         # A coding agent delegates browsing exactly as a personal one does —
         # the same fumbling with guessed selectors, in a pane where there is
         # also a repository to damage. See `permissions.NO_BROWSER`.
-        disallowed_tools=INVISIBLE + NO_BROWSER,
+        disallowed_tools=INVISIBLE + NO_BROWSER + NO_AUTHORING,
         env=NEVER_DEFERRED,
         include_partial_messages=True,
         thinking={"type": "adaptive", "display": "summarized"},

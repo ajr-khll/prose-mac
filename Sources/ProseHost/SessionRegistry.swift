@@ -26,7 +26,8 @@ public enum HostEvent: Sendable {
     case event(session: SessionID, event: Event)
     /// The agent stopped to ask the user something.
     case ask(
-        session: SessionID, id: RequestID, prompt: String, choices: [String], placeholder: String?
+        session: SessionID, id: RequestID, prompt: String, choices: [String],
+        placeholder: String?, secret: Bool
     )
     /// A failed turn, or the agent's process going away.
     case notice(session: SessionID, message: String)
@@ -59,6 +60,24 @@ public enum HostEvent: Sendable {
     /// Driving a browser pane. Each carries the request it owes an answer on,
     /// because every one of them finishes asynchronously inside WebKit.
     case browser(request: RequestID?, requester: SessionID, pane: PaneID, call: BrowserCall)
+
+    /// A durable automation request. Only requests reach this point: a
+    /// notification cannot be told whether validation or persistence failed.
+    case automation(request: RequestID, requester: SessionID, call: AutomationCall)
+
+    /// A brokered third-party call. Requests only, for `automation`'s reason
+    /// and one more: every one of these finishes over the network, and a
+    /// notification has nowhere to put "the token expired".
+    case integration(
+        request: RequestID, requester: SessionID, operation: String,
+        providers: [String], arguments: JSONValue)
+}
+
+public enum AutomationCall: Sendable, Equatable {
+    case create(JSONValue)
+    case list(includeRuns: Bool)
+    case change(id: String, action: String)
+    case emit(JSONValue)
 }
 
 /// What an agent asked a browser pane to do.
@@ -297,7 +316,7 @@ public final class SessionRegistry {
             guard claimed == session else { return }
             onEvent?(.event(session: session, event: event))
 
-        case .ask(let claimed, let prompt, let choices, let placeholder):
+        case .ask(let claimed, let prompt, let choices, let placeholder, let secret):
             guard let id = request else {
                 // A notification `ask` is dropped: the agent would otherwise
                 // wait forever for a reply it never asked for.
@@ -310,7 +329,7 @@ public final class SessionRegistry {
             onEvent?(
                 .ask(
                     session: session, id: id, prompt: prompt, choices: choices,
-                    placeholder: placeholder
+                    placeholder: placeholder, secret: secret
                 )
             )
 
@@ -535,6 +554,42 @@ public final class SessionRegistry {
                 .browser(
                     request: request, requester: session, pane: pane,
                     call: .network(since: since, failuresOnly: failuresOnly, limit: limit)))
+
+        case .automationCreate(let definition):
+            guard let request else { return }
+            onEvent?(.automation(request: request, requester: session, call: .create(definition)))
+
+        case .automationList(let includeRuns):
+            guard let request else { return }
+            onEvent?(
+                .automation(
+                    request: request, requester: session,
+                    call: .list(includeRuns: includeRuns)))
+
+        case .automationChange(let id, let action):
+            guard let request else { return }
+            onEvent?(
+                .automation(
+                    request: request, requester: session,
+                    call: .change(id: id, action: action)))
+
+        case .automationEmit(let event):
+            guard let request else { return }
+            onEvent?(.automation(request: request, requester: session, call: .emit(event)))
+
+        case .integrationCall(let claimed, let operation, let providers, let arguments):
+            guard let request else { return }
+            // A session may only broker as itself. The agent sends its own id
+            // and the socket already knows which session it is; disagreement
+            // means a pane asking the host to act as another one.
+            guard claimed == session else {
+                refuse(request, on: connection, "not your session")
+                return
+            }
+            onEvent?(
+                .integration(
+                    request: request, requester: session, operation: operation,
+                    providers: providers, arguments: arguments))
 
         case .result(let claimed, let value):
             guard claimed == session else { return }

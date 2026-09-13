@@ -359,3 +359,62 @@ struct HasConversationTests {
         #expect(transcript.hasConversation, "but prose does")
     }
 }
+
+
+@Suite("A credential does not stay in the transcript")
+struct SecretAskTests {
+    /// The defect this pins: `apps_connect` asked for a GitHub token through
+    /// an ordinary ask, the answer was recorded verbatim, and the token — with
+    /// `repo` scope — was then legible in a screenshot of the pane.
+    @Test("a secret answer is stored masked")
+    func secretAnswersAreMasked() {
+        var transcript = Transcript()
+        transcript.pushAsk(id: .number(1), prompt: "Token?", choices: [],
+                           placeholder: nil, secret: true)
+
+        // The agent still gets the real thing — it asked because it needs it.
+        let answered = transcript.answerAsk("ghp_realtoken")
+        #expect(answered == .number(1))
+
+        guard case .ask(_, _, _, _, let stored, _, _)? = transcript.blocks.last else {
+            Issue.record("expected an ask block")
+            return
+        }
+        #expect(stored != "ghp_realtoken")
+        let isAllBullets = stored?.allSatisfy { $0 == "\u{2022}" } ?? false
+        #expect(isAllBullets)
+    }
+
+    @Test("an ordinary answer is kept as typed")
+    func ordinaryAnswersAreNotMasked() {
+        var transcript = Transcript()
+        transcript.pushAsk(id: .number(1), prompt: "Which?", choices: [],
+                           placeholder: nil)
+        _ = transcript.answerAsk("the second one")
+
+        guard case .ask(_, _, _, _, let stored, _, _)? = transcript.blocks.last else {
+            Issue.record("expected an ask block")
+            return
+        }
+        #expect(stored == "the second one")
+    }
+
+    @Test("escalating a credential question keeps it a credential question")
+    func escalationKeepsTheFlag() {
+        // Handing it to the user because the parent declined does not make it
+        // stop being a token.
+        var transcript = Transcript()
+        transcript.pushAsk(id: .number(1), prompt: "Token?", choices: [],
+                           placeholder: nil, secret: true, supervisor: 7)
+        let escalated = transcript.escalateAsk()
+        #expect(escalated)
+
+        guard case .ask(_, _, _, _, _, let secret, let supervisor)? = transcript.blocks.last
+        else {
+            Issue.record("expected an ask block")
+            return
+        }
+        #expect(secret)
+        #expect(supervisor == nil)
+    }
+}

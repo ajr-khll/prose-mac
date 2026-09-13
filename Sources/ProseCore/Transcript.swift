@@ -45,6 +45,14 @@ public enum Block: Sendable, Equatable {
         choices: [String],
         placeholder: String?,
         answer: String?,
+        /// Whether what is typed here is a credential.
+        ///
+        /// Set, the field masks its input and the transcript records a row of
+        /// dots rather than the answer. The real text still reaches the agent
+        /// — it asked for a token because it needs one — but a transcript is
+        /// scrolled back through, screenshotted and pasted into conversations,
+        /// and a credential that got into one is a credential to revoke.
+        secret: Bool,
         /// The pane deciding this, when it is not the user's to decide yet.
         ///
         /// A question from a subagent goes to whoever spawned it first. The
@@ -118,7 +126,7 @@ public struct Transcript: Sendable {
     /// gets the first one answered first.
     public var pendingAsk: Block? {
         blocks.first { block in
-            if case .ask(_, _, _, _, let answer, _) = block { return answer == nil }
+            if case .ask(_, _, _, _, let answer, _, _) = block { return answer == nil }
             return false
         }
     }
@@ -197,12 +205,13 @@ public struct Transcript: Sendable {
         prompt: String,
         choices: [String],
         placeholder: String?,
+        secret: Bool = false,
         supervisor: PaneID? = nil
     ) {
         append(
             .ask(
-                id: id, prompt: prompt, choices: choices, placeholder: placeholder, answer: nil,
-                supervisor: supervisor)
+                id: id, prompt: prompt, choices: choices, placeholder: placeholder,
+                answer: nil, secret: secret, supervisor: supervisor)
         )
     }
 
@@ -213,20 +222,21 @@ public struct Transcript: Sendable {
     @discardableResult
     public mutating func escalateAsk() -> Bool {
         let pending = blocks.firstIndex { block in
-            if case .ask(_, _, _, _, let answer, let supervisor) = block {
+            if case .ask(_, _, _, _, let answer, _, let supervisor) = block {
                 return answer == nil && supervisor != nil
             }
             return false
         }
         guard let index = pending,
-              case .ask(let id, let prompt, let choices, let placeholder, _, _) = blocks[index]
+              case .ask(let id, let prompt, let choices, let placeholder, _, let secret, _) =
+                blocks[index]
         else { return false }
 
         replace(
             index,
             with: .ask(
-                id: id, prompt: prompt, choices: choices, placeholder: placeholder, answer: nil,
-                supervisor: nil))
+                id: id, prompt: prompt, choices: choices, placeholder: placeholder,
+                answer: nil, secret: secret, supervisor: nil))
         return true
     }
 
@@ -235,12 +245,12 @@ public struct Transcript: Sendable {
     @discardableResult
     public mutating func answerAsk(_ text: String) -> RequestID? {
         let pending = blocks.firstIndex { block in
-            if case .ask(_, _, _, _, let answer, _) = block { return answer == nil }
+            if case .ask(_, _, _, _, let answer, _, _) = block { return answer == nil }
             return false
         }
         guard let index = pending,
-              case .ask(let id, let prompt, let choices, let placeholder, _, let supervisor) =
-                blocks[index]
+              case .ask(let id, let prompt, let choices, let placeholder, _, let secret,
+                        let supervisor) = blocks[index]
         else { return nil }
 
         replace(
@@ -250,7 +260,10 @@ public struct Transcript: Sendable {
                 prompt: prompt,
                 choices: choices,
                 placeholder: placeholder,
-                answer: text,
+                // What the *agent* gets is returned from this function and is
+                // untouched; this is only what the transcript keeps.
+                answer: secret ? String(repeating: "•", count: 8) : text,
+                secret: secret,
                 supervisor: supervisor
             )
         )

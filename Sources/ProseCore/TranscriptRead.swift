@@ -225,8 +225,11 @@ extension Transcript {
         case .thinking(_, let text, _, _): text
         case .activity(_, let label, let detail, _, _): label + " " + (detail ?? "")
         case .attachment(let attachment): attachment.text
-        case .ask(_, let prompt, let choices, _, let answer, _):
-            ([prompt] + choices + [answer ?? ""]).joined(separator: " ")
+        case .ask(_, let prompt, let choices, _, let answer, let secret, _):
+            // A secret answer is already stored masked, but `match` would
+            // otherwise let a reader confirm a credential by guessing at it
+            // one substring at a time.
+            ([prompt] + choices + [secret ? "" : (answer ?? "")]).joined(separator: " ")
         case .notice(let message): message
         }
         let range = NSRange(haystack.startIndex..., in: haystack)
@@ -286,14 +289,19 @@ extension Transcript {
             case .summary: fields["n"] = .int(Int64(attachment.text.count))
             }
 
-        case .ask(_, let prompt, let choices, let placeholder, let answer, _):
+        case .ask(_, let prompt, let choices, let placeholder, let answer, let secret, _):
             // **Always full.** An ask is small, and it is the thing a
             // supervising parent most needs to act on — summarising it would
             // force a second call to do anything useful.
             fields["prompt"] = .string(prompt)
             if !choices.isEmpty { fields["choices"] = .array(choices.map { .string($0) }) }
             if let placeholder { fields["placeholder"] = .string(placeholder) }
+            // The answer is already masked in the block. Said again here
+            // because this is the copy a *parent* reads, and a parent asking
+            // its child for the token it was just given is the one path where
+            // a credential would cross a pane boundary.
             fields["answer"] = answer.map { JSONValue.string($0) } ?? .null
+            if secret { fields["secret"] = .bool(true) }
 
         case .notice(let message):
             // Always full, for the same reason, and always small anyway.

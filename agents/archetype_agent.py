@@ -81,8 +81,12 @@ def main() -> None:
 
     credentials.load()
     asker = Asker()
+    # `confine=True`: this archetype's `allow:` line is the whole auto-approve
+    # list for prose's own tools. Without it `loop.serve` appends every
+    # registered one afterwards and the declaration confines nothing.
     run(options(archetype, values, asker),
-        name=os.environ.get("PROSE_AGENT_NAME", archetype.name), asker=asker)
+        name=os.environ.get("PROSE_AGENT_NAME", archetype.name), asker=asker,
+        confine=True, integrations=archetype.integrations)
 
 
 if __name__ == "__main__":

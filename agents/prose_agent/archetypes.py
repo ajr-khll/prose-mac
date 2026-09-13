@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 from dataclasses import dataclass, field
 from functools import lru_cache
@@ -56,7 +57,17 @@ ENVIRONMENT = "PROSE_ARCHETYPES"
 STRUCTURED = ("parameters", "returns")
 
 #: Frontmatter keys read as a comma-separated list of names.
-LISTS = ("allow", "deny", "skills")
+LISTS = ("allow", "deny", "skills", "integrations")
+
+#: Every key the header understands. The parser ignores the rest in silence, so
+#: this is what `lint` measures a draft against — inventing `tools:` or
+#: `permissions:` is a mistake that otherwise reads as working.
+KEYS = ("name", "description", "preset", "model", "effort", "spawns",
+        *LISTS, *STRUCTURED)
+
+
+#: A `{name}` in a body, and not the `{"key": …}` of a JSON example.
+PLACEHOLDER = re.compile(r"\{([a-z_][a-z0-9_]*)\}")
 
 
 class ArchetypeError(Exception):
@@ -89,6 +100,12 @@ class Archetype:
     #: listing at all, which is the right default for a narrow expert: the
     #: catalogue costs a description per skill on every turn.
     skills: tuple[str, ...] = ()
+    #: Third-party providers this archetype brokers — `apps.PROVIDERS`. Empty
+    #: means the `apps_*` server is not registered in its pane at all, which is
+    #: every archetype but the two integration ones. It is declared in the file
+    #: and never in `params`, because a parent that could choose its child's
+    #: providers would hold the union of all of them.
+    integrations: tuple[str, ...] = ()
     #: Whether this archetype may spawn panes of its own. Off by default —
     #: otherwise a narrow expert spawns a wide one and has everything it was
     #: denied, which descendant containment does not catch because the child
@@ -210,10 +227,117 @@ def parse(text: str, name: str) -> Archetype:
         allow=fields.get("allow", ()),
         deny=fields.get("deny", ()),
         skills=fields.get("skills", ()),
+        integrations=fields.get("integrations", ()),
         spawns=str(fields.get("spawns", "")).lower() in ("true", "yes", "1"),
         parameters=fields.get("parameters", {}),
         returns=fields.get("returns", {}),
     )
+
+
+def lint(text: str, name: str) -> list[str]:
+    """Everything wrong with one archetype file, in the order it is worth
+    fixing. Empty means it is deployable.
+
+    This is the one definition of valid: `tests/test_archetypes.py` measures the
+    bundled files with it, and `prose_archetype_check` hands it to the agent
+    that is writing one. Two copies of these rules would drift, and the drift
+    would show up as a specialist that passes review and never loads.
+
+    The failures it is really for are the silent ones. `catalogue` **skips** a
+    file it cannot parse — one line on stderr and the archetype is simply
+    absent, with nothing raised anywhere — and the header drops keys it does not
+    know without comment. Neither is discoverable by reading the file back.
+    """
+    from .tools import tool_names
+
+    try:
+        archetype = parse(text, name)
+    except ArchetypeError as bad:
+        # Nothing further is worth saying: every other rule reads a field that
+        # this failure means we do not have.
+        return [str(bad)]
+
+    problems: list[str] = []
+
+    header = text[4:].partition("\n---\n")[0]
+    for line in header.splitlines():
+        if ":" not in line or line.startswith((" ", "\t", "#")):
+            continue
+        key = line.partition(":")[0].strip()
+        if key not in KEYS:
+            problems.append(
+                f"{key!r} is not a header key — it is dropped in silence, so "
+                f"whatever you meant by it is not happening. One of {', '.join(KEYS)}")
+
+    if "use when" not in archetype.description.lower():
+        problems.append("description: say when to reach for this, in the words a "
+                        "request would use — it is a routing rule, not a summary, "
+                        "and it must contain 'use when'")
+    if len(archetype.description) >= 1024:
+        problems.append(f"description: {len(archetype.description)} characters, and it "
+                        f"sits in every parent's context — keep it under 1024")
+    if len(archetype.body.strip()) <= 600:
+        problems.append("body: too short to be worth a pane. The argument for an "
+                        "archetype is that it holds detail the parent does not; one "
+                        "that says little is a skill written in the wrong place")
+
+    real = {name.rsplit("__", 1)[-1] for name in tool_names()}
+    # `apps_*` exist only in a pane whose archetype declared a provider set, so
+    # they are measured against that declaration rather than the global
+    # catalogue — naming one without `integrations:` is an allowance for a
+    # server that will not be registered.
+    from . import apps
+
+    if archetype.integrations:
+        try:
+            apps.providers(archetype.integrations)
+        except Exception as bad:  # noqa: BLE001 - reported, not raised
+            problems.append(str(bad))
+        else:
+            real |= {name.rsplit("__", 1)[-1]
+                     for name in apps.tool_names(archetype.integrations)}
+
+    for named in archetype.allow + archetype.deny:
+        if named.startswith(("prose_", "browser_", "apps_")) and named not in real:
+            hint = ""
+            if named.startswith("apps_") and not archetype.integrations:
+                hint = (" — and this file declares no `integrations:`, so the "
+                        "apps server is never registered in its pane")
+            problems.append(f"no such tool {named!r} — an unrecognised name is ignored "
+                            f"rather than refused, so this line does nothing{hint}")
+
+    if archetype.integrations and archetype.spawns:
+        # A pane holding a workspace credential that can also open panes hands
+        # that credential's reach to something with no declaration at all.
+        problems.append("integrations with spawns: true — a pane holding a "
+                        "provider credential must not open panes, because the "
+                        "child is not measured against this file's allowance")
+
+    used = set(PLACEHOLDER.findall(archetype.body))
+    for placeholder in sorted(used - set(archetype.parameters)):
+        problems.append(f"{{{placeholder}}} is never bound — declare it in "
+                        f"`parameters` or it reaches the model as literal braces")
+    for declared, spec in archetype.parameters.items():
+        if declared not in used:
+            problems.append(f"parameter {declared!r} is declared and never used — a "
+                            f"knob wired to nothing")
+        if not spec.get("description"):
+            problems.append(f"parameter {declared!r}: no description, and the parent "
+                            f"chooses its value from that alone")
+        if not (spec.get("required") or "default" in spec):
+            problems.append(f"parameter {declared!r}: neither required nor defaulted, "
+                            f"so it is silently absent when nobody passes it")
+
+    if archetype.returns:
+        if archetype.returns.get("type") != "object":
+            problems.append("returns: use a JSON object schema, so the parent can read "
+                            "fields rather than parse prose")
+        if "failed" not in archetype.returns.get("properties", {}):
+            problems.append("returns: no shape for failure. Without somewhere to put it "
+                            "a child that cannot do the job improvises prose, and the "
+                            "parent's parse breaks on the one case that matters")
+
+    return problems
 
 
 def roots() -> list[Path]:

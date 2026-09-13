@@ -15,6 +15,7 @@ struct WorkspaceView: View {
     @FocusState private var region: Bool
 
     var body: some View {
+        @Bindable var workspace = workspace
         let m = workspace.metrics
         // The panel's width this frame. Both this and the divider animate from
         // the same state, so at rest collapsed neither is drawn at all.
@@ -99,6 +100,11 @@ struct WorkspaceView: View {
             Button("Close Pane", role: .destructive) { workspace.confirmClosePane() }
         } message: {
             Text("Its agent is ended and its transcript is discarded. This cannot be undone.")
+        }
+        .sheet(isPresented: $workspace.automationPanelPresented) {
+            AutomationPanel()
+                .environment(workspace)
+                .frame(minWidth: 700, minHeight: 480)
         }
         // spec §12 gives the tab strip the **plain** keys — `Enter starts a
         // rename` sits in a list of what the unmodified keys do, and the port's

@@ -58,6 +58,26 @@ public final class AgentProcess: @unchecked Sendable {
         resolveAgentFile(".venv/bin/python3") ?? "python3"
     }
 
+    /// Resolves the same fixed flavour namespace `prose_spawn` exposes. A
+    /// stored automation never contains argv; at execution time it names one
+    /// of prose's own entry points or an archetype file that exists now.
+    public static func command(flavour: String, parameters: JSONValue = .object([:])) -> [String]? {
+        switch flavour {
+        case "prose":
+            return []
+        case "code":
+            return [interpreter, resolveAgentFile("code_agent.py") ?? "agents/code_agent.py"]
+        default:
+            let valid = flavour.range(
+                of: #"^[a-z0-9][a-z0-9-]{0,63}$"#, options: .regularExpression) != nil
+            guard valid,
+                  resolveAgentFile("archetypes/\(flavour).md") != nil,
+                  let entry = resolveAgentFile("archetype_agent.py")
+            else { return nil }
+            return [interpreter, entry, flavour, parameters.line()]
+        }
+    }
+
     /// Where something under `agents/` actually is, if it can be found.
     ///
     /// Spec §11 writes the default command with a relative path, which only

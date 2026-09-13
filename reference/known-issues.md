@@ -249,8 +249,32 @@ not already claimed.
   tight to the glyphs, with none of the block's 8pt padding or hairline border, so it may read as
   too faint or too tight at 13pt. It shares the block's token deliberately — one way for code to
   look — but it is the sort of thing that only a human looking at it can settle, and §2 applies.
+- ~~**An archetype's `allow:` list does not confine it.**~~ **Fixed.** `loop.auto_approved` now
+  builds the final list once, from the declaration, and `archetype_agent` passes `confine=True`.
+  A general pane agent is still widened — it has no declaration to be measured against and a card
+  for `prose_wait` buys nothing. `ARCHETYPE_GUIDE.md` §5 still describes the old behaviour and
+  needs a pass.
+- **Browser and authoring tools used to leak into every archetype for the same reason.**
+  `skill-designer`, which writes Markdown files, held all sixteen `browser_*` tools. Closed in
+  `permissions.allowance` by denying `BROWSER` and `AUTHORING` to any archetype that has not named
+  them in `allow` — deliberate, not accidental, and `browser-pilot` is unaffected because it does
+  name them. It is a patch on the item above rather than a fix for it: the next capability added to
+  `tools.py` is reachable by every archetype until someone remembers to list it.
 - **The SDK skips a missing plugin path in silence.** `Harness` reads the `init` message and puts
   the skill count in the pane header, which detects it, but nothing prevents it.
+- **The connectors read but do not write.** `workflow` and `deployment` load, spawn, connect and
+  read. `apps_connect` asks in a card and stores the credential in the Keychain — a pasted token for
+  Slack, GitHub, Linear and Notion, a browser-tab OAuth for Google, which has no personal-token
+  path. `apps_search` and `apps_get` work for all five. `apps_prepare` and `apps_commit` still
+  refuse, and `ProviderCapabilities.unavailable` names every write operation so a specialist reports
+  the gap in `failed` rather than hunting for another route. What remains: those two (plan Phases 3
+  and 4, needing per-operation schemas and a version check per provider), and a Connections view —
+  today a connection can only be made from inside a pane and only removed by deleting
+  `~/Library/Application Support/Prose/Connections/connections.json` and its Keychain items.
+- **No read slice has been run against a live provider.** Every one was written from the providers'
+  documented shapes, and the project's own rule is that mappings get written from observed output.
+  The refusal paths are tested; the happy paths are not. Expect the first real call to each provider
+  to find a field name wrong. `PROSE_LOG_DIR` captures the wire.
 
 ---
 
