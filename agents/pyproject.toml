@@ -1,0 +1,22 @@
+# The agent side's one dependency, named in one place.
+#
+# `prose_agent` is imported by path — `pane_agent.py` and `echo_agent.py` both
+# put their own directory on `sys.path`, because a bundled app and a source
+# checkout put this directory in different places and neither is the working
+# directory. So this file exists to pin the SDK and to make
+# `pip install -e ./agents` populate a venv, not because anything imports
+# `prose_agent` as an installed distribution.
+
+[project]
+name = "prose-agent"
+version = "0.1.0"
+description = "The client for an agent running in a prose pane."
+requires-python = ">=3.10"
+dependencies = ["claude-agent-sdk>=0.2.152"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["prose_agent"]

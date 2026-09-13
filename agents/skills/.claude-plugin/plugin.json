@@ -1,0 +1,5 @@
+{
+  "name": "prose",
+  "description": "Capabilities that only make sense inside prose: opening panes, supervising the agents in them, and driving a browser pane.",
+  "version": "0.1.0"
+}

@@ -1,0 +1,15 @@
+.DS_Store
+
+# Swift / SwiftPM
+.build/
+.swiftpm/
+Packages/
+*.xcodeproj
+*.xcworkspace
+DerivedData/
+
+# Python — the agents live here, and the SDK is large enough to matter
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
