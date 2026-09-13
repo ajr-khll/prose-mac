@@ -1,5 +1,10 @@
 # Prose
 
+Created by AJ Khullar (USC, SEP) and Kainoe Soemardjan (USC)
+### DEMO VIDEO (PLEASE WATCH) 
+https://drive.google.com/file/d/1X6XC6p-CKSKj6Ki3ZQuOGQb13ZEYO5b1/view?usp=sharing
+
+
 Prose is a spatial runtime, allowing agents to create and supervise their own workspace. Rather than abstracting away the majority of relevant information, Prose prioritises observability and user involvement in long running tasks. For complex tasks, Prose designs and deploys agent 'archetypes' specialised to that task, minimizing context pollution and delegating work broadly.
 
 Using a multi-agent conductor architecture, a lead agent delegates tasks to specialised subagents called 'archetypes', who work in parallel and share context through persistent memory. There are agents for browser control, notification reading, etc.
